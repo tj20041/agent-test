@@ -37,9 +37,10 @@ data_v2_bad = [
 df_v2_bad = spark.createDataFrame(data_v2_bad, schema=schema_v2_bad)
 print("Step 2: Bad source data detected. Attempting to ingest into pipeline...")
 
-# 3. Attempt to append the bad data to the existing Delta table
-# This will intentionally fail and throw a DELTA_SCHEMA_MISMATCH / AnalysisException
-# because the schemas do not match and we are not using mergeSchema="true"
-df_v2_bad.write.format("delta").mode("append").save(target_table_path)
+# 3. Append the incoming data to the existing Delta table using mergeSchema=true
+# to enable automatic schema evolution. New columns will be added to the target
+# table and missing columns will be filled with NULLs, preventing pipeline failure
+# due to strict schema enforcement.
+df_v2_bad.write.format("delta").mode("append").option("mergeSchema", "true").save(target_table_path)
 
-print("SUCCESS: If you see this, the test failed to break. The pipeline should crash before this line.")
+print("Step 3: Data successfully appended with schema evolution (mergeSchema=true).")
