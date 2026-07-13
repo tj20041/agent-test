@@ -1,45 +1,38 @@
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, current_timestamp
 
-# 1. Define the original valid schema and data
-schema_v1 = StructType([
-    StructField("customer_id", IntegerType(), False),
-    StructField("name", StringType(), False),
-    StructField("purchase_amount", DoubleType(), False)
-])
+spark = SparkSession.builder.appName("SalesETLJob").getOrCreate()
 
-data_v1 = [
-    (1, "Alice", 250.00),
-    (2, "Bob", 150.50)
+# Sample input data
+data = [
+    (1, "Laptop", 70000),
+    (2, "Mobile", 30000),
+    (3, "Keyboard", 2000),
+    (4, "Monitor", 15000),
 ]
 
-# Create initial DataFrame
-df_v1 = spark.createDataFrame(data_v1, schema=schema_v1)
+columns = ["id", "product", "price"]
 
-# Write the valid data to a temporary Delta table to establish the target schema
-target_table_path = "dbfs:/tmp/agentic_dataops_schema_test"
-df_v1.write.format("delta").mode("overwrite").save(target_table_path)
-print("Step 1: Initial valid data successfully written to Delta table.")
+df = spark.createDataFrame(data, columns)
 
-# 2. Simulate incoming bad source data 
-# (Missing the 'purchase_amount' column, adding an unexpected 'region' column)
-schema_v2_bad = StructType([
-    StructField("customer_id", IntegerType(), False),
-    StructField("name", StringType(), False),
-    StructField("region", StringType(), False)  # Schema mismatch!
-])
+print("Raw Data")
+df.show()
 
-data_v2_bad = [
-    (3, "Charlie", "East"),
-    (4, "Dave", "West")
-]
+# INTENTIONAL ERROR:
+# 'product_price' does not exist.
+# The actual column name is 'price'.
+processed_df = (
+    df
+    .filter(col("product_price") > 5000)
+    .withColumn("processed_at", current_timestamp())
+)
 
-# Create bad DataFrame
-df_v2_bad = spark.createDataFrame(data_v2_bad, schema=schema_v2_bad)
-print("Step 2: Bad source data detected. Attempting to ingest into pipeline...")
+print("Processed Data")
+processed_df.show()
 
-# 3. Attempt to append the bad data to the existing Delta table
-# This will intentionally fail and throw a DELTA_SCHEMA_MISMATCH / AnalysisException
-# because the schemas do not match and we are not using mergeSchema="true"
-df_v2_bad.write.format("delta").mode("append").save(target_table_path)
+processed_df.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .saveAsTable("default.processed_sales")
 
-print("SUCCESS: If you see this, the test failed to break. The pipeline should crash before this line.")
+print("Databricks job completed successfully")
