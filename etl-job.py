@@ -18,12 +18,11 @@ df = spark.createDataFrame(data, columns)
 print("Raw Data")
 df.show()
 
-# INTENTIONAL ERROR:
-# 'product_price' does not exist.
-# The actual column name is 'price'.
+# Fixed: changed 'product_price' to 'price' to match the actual DataFrame schema.
+# The DataFrame schema contains columns: 'id', 'product', 'price'.
 processed_df = (
     df
-    .filter(col("product_price") > 5000)
+    .filter(col("price") > 5000)
     .withColumn("processed_at", current_timestamp())
 )
 
