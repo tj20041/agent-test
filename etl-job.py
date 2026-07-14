@@ -1,9 +1,10 @@
 import logging
 import sys
+from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 
 # ==========================================
-# 0. DATABRICKS-SAFE LOGGING SETUP
+# 0. LOCAL-SAFE LOGGING SETUP
 # ==========================================
 logger = logging.getLogger("CustomerDemographicsETL")
 logger.setLevel(logging.INFO)
@@ -17,6 +18,43 @@ if not logger.handlers:
 logger.propagate = False
 
 logger.info("Initializing Customer Demographics ETL Job...")
+
+# ==========================================
+# 0.1 LOCAL SPARK SESSION INITIALIZATION
+# ==========================================
+# On the LOCAL target platform there is no ambient 'spark' object,
+# so we must build one explicitly with a local master.
+spark = (
+    SparkSession.builder
+    .appName("CustomerDemographicsETL")
+    .master("local[*]")
+    .getOrCreate()
+)
+
+
+def assert_union_compatible(left_df, right_df):
+    """Validate that two DataFrames share identical column names and types.
+
+    This runs before any union so schema drift surfaces as a clear,
+    actionable error instead of an obscure cast failure downstream.
+    """
+    left_fields = {f.name: f.dataType for f in left_df.schema.fields}
+    right_fields = {f.name: f.dataType for f in right_df.schema.fields}
+
+    if set(left_fields.keys()) != set(right_fields.keys()):
+        raise ValueError(
+            "Union column-name mismatch. "
+            f"left={sorted(left_fields.keys())} right={sorted(right_fields.keys())}"
+        )
+
+    for name, left_type in left_fields.items():
+        right_type = right_fields[name]
+        if left_type != right_type:
+            raise ValueError(
+                f"Union column type mismatch for '{name}': "
+                f"left={left_type} right={right_type}"
+            )
+
 
 try:
     # ==========================================
@@ -62,14 +100,26 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # Validate schema compatibility before merging so any future
+    # column drift fails fast with a clear message.
+    assert_union_compatible(df1_silver, df2_silver)
+
+    # FIX: Use unionByName so columns align by NAME, not position.
+    # df1_silver has (id, email, age) while df2_silver has (email, age, id).
+    # A positional union() would stack the email String onto the id BIGINT
+    # column, triggering CAST_INVALID_INPUT (SQLSTATE 22018).
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
-    display(df_gold)
+    # FIX: display() is Databricks-only; use portable show() for LOCAL execution.
+    df_gold.show(truncate=False)
 
 except Exception as e:
     logger.error("Pipeline failed during execution. Error details: %s", str(e))
     raise
+finally:
+    try:
+        spark.stop()
+    except Exception:
+        pass
