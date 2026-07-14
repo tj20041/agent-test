@@ -62,11 +62,28 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # ------------------------------------------
+    # Pre-union schema validation (fail-fast gate)
+    # Ensures both DataFrames share identical column names and dtypes
+    # regardless of positional order before invoking union.
+    # ------------------------------------------
+    df1_fields = {field.name: field.dataType for field in df1_silver.schema.fields}
+    df2_fields = {field.name: field.dataType for field in df2_silver.schema.fields}
+
+    if df1_fields != df2_fields:
+        raise ValueError(
+            "Schema mismatch between df1_silver and df2_silver before union. "
+            f"df1 fields: {df1_fields}; df2 fields: {df2_fields}. "
+            "Column names and dtypes must match for a safe name-based union."
+        )
+
+    # FIX: Use name-based union so columns align by NAME, not position.
+    # Previously df1_silver.union(df2_silver) aligned the IntegerType 'id'
+    # column of df1 with the StringType 'email' column of df2 (positional),
+    # forcing a STRING-to-BIGINT cast and raising CAST_INVALID_INPUT.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
