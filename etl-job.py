@@ -62,11 +62,24 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # Defensive schema-alignment check: both DataFrames must share the
+    # same set of column NAMES before a name-based union is safe.
+    if set(df1_silver.columns) != set(df2_silver.columns):
+        raise ValueError(
+            "Schema mismatch between Silver DataFrames before Gold merge. "
+            f"df1_silver columns={df1_silver.columns}, "
+            f"df2_silver columns={df2_silver.columns}"
+        )
+
+    # FIX: df1_silver has columns (id, email, age) while df2_silver has
+    # (email, age, id). The previous positional union() aligned the String
+    # 'email' column of df2_silver onto the Integer 'id' column of df1_silver,
+    # causing CAST_INVALID_INPUT / SparkNumberFormatException (SQLSTATE 22018).
+    # unionByName aligns columns by NAME regardless of their physical order,
+    # which is fully supported on Databricks Runtime (Spark 3.x).
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
