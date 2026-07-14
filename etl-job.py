@@ -1,84 +1,75 @@
 import logging
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
-from pyspark.sql.functions import udf, col
+import sys
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-logger = logging.getLogger("PII_ETL_Validator")
+# ==========================================
+# 0. DATABRICKS-SAFE LOGGING SETUP
+# ==========================================
+logger = logging.getLogger("CustomerDemographicsETL")
+logger.setLevel(logging.INFO)
 
-# ── Test case selector ────────────────────────────────────────────────────────
-TEST_CASE = "pii_violation"   # change to "success" to test the happy path
+if not logger.handlers:
+    stream_handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
-# ── Shared schema and data ────────────────────────────────────────────────────
-schema = StructType([
-    StructField("customer_id", IntegerType(), False),
-    StructField("email",       StringType(),  True),
-    StructField("phone",       StringType(),  True),
-    StructField("amount",      DoubleType(),  False),
-])
+logger.propagate = False
 
-data_good = [
-    (1, "alice@company.com",   "555-010-0000",  250.00),
-    (2, "bob@company.com",     "555-010-0001",  150.50),
-]
+logger.info("Initializing Customer Demographics ETL Job...")
 
-data_with_pii_violation = data_good + [
-    (3, "jane.doe@gmail.com",  "555-019-8372", -100.00),   # negative amount + PII
-    (4, "john.smith@gmail.com","555-911-0001", -999.99),   # second bad PII row
-]
+try:
+    # ==========================================
+    # 1. SCHEMA DEFINITIONS
+    # ==========================================
+    logger.info("Defining explicit schemas...")
+    schema1 = StructType([
+        StructField("id", IntegerType(), True),
+        StructField("email", StringType(), True),
+        StructField("age", IntegerType(), True)
+    ])
 
-# ── Happy-path test ───────────────────────────────────────────────────────────
-if TEST_CASE == "success":
+    schema2 = StructType([
+        StructField("email", StringType(), True),
+        StructField("age", IntegerType(), True),
+        StructField("id", IntegerType(), True)
+    ])
 
-    logger.info("TEST_CASE=success — running clean ingestion")
+    # ==========================================
+    # 2. BRONZE LAYER (Extraction)
+    # ==========================================
+    logger.info("Extracting data into Bronze layer...")
+    df1_bronze = spark.createDataFrame([
+        (1, "alice.smith@example.com", 25),
+        (2, "test.user_99@domain.net", -15),
+        (3, "charlie.brown@company.org", 30)
+    ], schema=schema1)
 
-    df = spark.createDataFrame(data_good, schema=schema)
-    logger.info("DataFrame created with %d rows", df.count())
+    df2_bronze = spark.createDataFrame([
+        ("dave.miller@startup.io", 22, 4),
+        ("bot_account_x@spam.com", -5, 5),
+        ("eve.adams@enterprise.co", 28, 6)
+    ], schema=schema2)
 
-    df.write.format("delta").mode("overwrite") \
-        .option("overwriteSchema", "true") \
-        .save("dbfs:/tmp/pii_etl_demo/clean")
+    # ==========================================
+    # 3. SILVER LAYER (Transformation)
+    # ==========================================
+    logger.info("Filtering noisy data for Silver layer...")
+    df1_silver = df1_bronze.filter("age >= 0")
+    df2_silver = df2_bronze.filter("age >= 0")
 
-    logger.info("Write completed successfully — no PII violations detected")
+    # ==========================================
+    # 4. GOLD LAYER (Integration)
+    # ==========================================
+    logger.info("Integrating Silver tables into Gold layer...")
+    
+    # INTENTIONAL ERROR: 
+    # Attempting to merge IntegerType ('id') with StringType ('email')
+    df_gold = df1_silver.union(df2_silver)
+    
+    logger.info("Pipeline completed successfully.")
+    display(df_gold)
 
-# ── PII-in-error test ─────────────────────────────────────────────────────────
-elif TEST_CASE == "pii_violation":
-
-    logger.info("TEST_CASE=pii_violation — loading dataset that contains bad rows")
-
-    df = spark.createDataFrame(data_with_pii_violation, schema=schema)
-    logger.info("DataFrame created with %d rows (includes bad PII rows)", df.count())
-
-    # Validation UDF — raises ValueError with PII baked into the message.
-    # Python's logging module routes this to stderr which Databricks
-    # captures reliably in the "Recent log files" UI tab.
-    @udf(returnType=DoubleType())
-    def validate_amount(amount, email, phone):
-        if amount < 0:
-            raise ValueError(
-                f"DATA QUALITY VIOLATION: negative amount={amount} "
-                f"for customer email={email} phone={phone}"
-            )
-        return amount
-
-    logger.info("Applying validation UDF — crash expected on bad rows")
-
-    df_validated = df.withColumn(
-        "amount",
-        validate_amount(col("amount"), col("email"), col("phone"))
-    )
-
-    try:
-        df_validated.write.format("delta").mode("overwrite") \
-            .option("overwriteSchema", "true") \
-            .save("dbfs:/tmp/pii_etl_demo/validated")
-
-        logger.info("Write succeeded — this line should NOT appear")
-
-    except Exception as exc:
-        # Log the full exception (including the PII ValueError) via the
-        # Python logging module so it lands in stderr / the UI log tab.
-        logger.error("Pipeline failed — data quality violation: %s", exc)
-        raise   # re-raise so Databricks marks the job as FAILED
+except Exception as e:
+    logger.error("Pipeline failed during execution. Error details: %s", str(e))
+    raise
