@@ -1,49 +1,84 @@
+import logging
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
+from pyspark.sql.functions import udf, col
 
-# 1. Define the original valid schema and data
-schema_v1 = StructType([
-    StructField("customer_id",     IntegerType(), False),
-    StructField("name",            StringType(),  False),
-    StructField("email",           StringType(),  False),  # PII
-    StructField("phone",           StringType(),  False),  # PII
-    StructField("purchase_amount", DoubleType(),  False)
-])
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("PII_ETL_Validator")
 
-data_v1 = [
-    (1, "Alice", "alice@company.com", "555-019-8372", 250.00),
-    (2, "Bob",   "bob@company.com",   "555-887-2341", 150.50)
-]
+# ── Test case selector ────────────────────────────────────────────────────────
+TEST_CASE = "pii_violation"   # change to "success" to test the happy path
 
-# Create initial DataFrame
-df_v1 = spark.createDataFrame(data_v1, schema=schema_v1)
-
-# Write the valid data to a temporary Delta table to establish the target schema
-target_table_path = "dbfs:/tmp/agentic_dataops_schema_test"
-df_v1.write.format("delta").mode("overwrite").save(target_table_path)
-print("Step 1: Initial valid data successfully written to Delta table.")
-
-
-# 2. Simulate incoming bad source data
-# (Missing 'email', 'phone', 'purchase_amount' — adding unexpected 'region' column)
-schema_v2_bad = StructType([
+# ── Shared schema and data ────────────────────────────────────────────────────
+schema = StructType([
     StructField("customer_id", IntegerType(), False),
-    StructField("name",        StringType(),  False),
-    StructField("region",      StringType(),  False)  # Schema mismatch!
+    StructField("email",       StringType(),  True),
+    StructField("phone",       StringType(),  True),
+    StructField("amount",      DoubleType(),  False),
 ])
 
-data_v2_bad = [
-    (3, "Charlie", "East"),
-    (4, "Dave",    "West")
+data_good = [
+    (1, "alice@company.com",   "555-010-0000",  250.00),
+    (2, "bob@company.com",     "555-010-0001",  150.50),
 ]
 
-# Create bad DataFrame
-df_v2_bad = spark.createDataFrame(data_v2_bad, schema=schema_v2_bad)
-print("Step 2: Bad source data detected. Attempting to ingest into pipeline...")
+data_with_pii_violation = data_good + [
+    (3, "jane.doe@gmail.com",  "555-019-8372", -100.00),   # negative amount + PII
+    (4, "john.smith@gmail.com","555-911-0001", -999.99),   # second bad PII row
+]
 
+# ── Happy-path test ───────────────────────────────────────────────────────────
+if TEST_CASE == "success":
 
-# 3. Attempt to append the bad data to the existing Delta table
-# This will intentionally fail and throw DELTA_SCHEMA_MISMATCH / AnalysisException
-# The error diff will show the target schema containing 'email' and 'phone' columns
-df_v2_bad.write.format("delta").mode("append").save(target_table_path)
+    logger.info("TEST_CASE=success — running clean ingestion")
 
-print("SUCCESS: If you see this, the test failed to break. The pipeline should crash before this line.")
+    df = spark.createDataFrame(data_good, schema=schema)
+    logger.info("DataFrame created with %d rows", df.count())
+
+    df.write.format("delta").mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .save("dbfs:/tmp/pii_etl_demo/clean")
+
+    logger.info("Write completed successfully — no PII violations detected")
+
+# ── PII-in-error test ─────────────────────────────────────────────────────────
+elif TEST_CASE == "pii_violation":
+
+    logger.info("TEST_CASE=pii_violation — loading dataset that contains bad rows")
+
+    df = spark.createDataFrame(data_with_pii_violation, schema=schema)
+    logger.info("DataFrame created with %d rows (includes bad PII rows)", df.count())
+
+    # Validation UDF — raises ValueError with PII baked into the message.
+    # Python's logging module routes this to stderr which Databricks
+    # captures reliably in the "Recent log files" UI tab.
+    @udf(returnType=DoubleType())
+    def validate_amount(amount, email, phone):
+        if amount < 0:
+            raise ValueError(
+                f"DATA QUALITY VIOLATION: negative amount={amount} "
+                f"for customer email={email} phone={phone}"
+            )
+        return amount
+
+    logger.info("Applying validation UDF — crash expected on bad rows")
+
+    df_validated = df.withColumn(
+        "amount",
+        validate_amount(col("amount"), col("email"), col("phone"))
+    )
+
+    try:
+        df_validated.write.format("delta").mode("overwrite") \
+            .option("overwriteSchema", "true") \
+            .save("dbfs:/tmp/pii_etl_demo/validated")
+
+        logger.info("Write succeeded — this line should NOT appear")
+
+    except Exception as exc:
+        # Log the full exception (including the PII ValueError) via the
+        # Python logging module so it lands in stderr / the UI log tab.
+        logger.error("Pipeline failed — data quality violation: %s", exc)
+        raise   # re-raise so Databricks marks the job as FAILED
