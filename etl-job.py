@@ -51,6 +51,13 @@ try:
         ("eve.adams@enterprise.co", 28, 6)
     ], schema=schema2)
 
+    # Schema assertions to catch column-order drift at the earliest stage
+    assert df1_bronze.columns == ['id', 'email', 'age'], \
+        f'df1_bronze schema mismatch: {df1_bronze.columns}'
+    assert df2_bronze.columns == ['email', 'age', 'id'], \
+        f'df2_bronze schema mismatch: {df2_bronze.columns}'
+    logger.info("Bronze schema assertions passed.")
+
     # ==========================================
     # 3. SILVER LAYER (Transformation)
     # ==========================================
@@ -62,11 +69,21 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName() to align columns by name rather than position,
+    # preventing SparkNumberFormatException (CAST_INVALID_INPUT / SQLSTATE: 22018)
+    # that occurred when the bare union() positionally mapped schema2's
+    # StringType 'email' column against schema1's IntegerType 'id' column.
+    df_gold = df1_silver.unionByName(df2_silver)
+
+    # Data quality assertions on the Gold output
+    gold_count = df_gold.count()
+    assert gold_count > 0, "Gold layer is empty after union"
+    null_ids = df_gold.filter(df_gold.id.isNull()).count()
+    assert null_ids == 0, \
+        f"{null_ids} NULL id values detected in Gold layer — possible positional misalignment"
+    logger.info("Gold layer data quality checks passed. Row count: %d", gold_count)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
