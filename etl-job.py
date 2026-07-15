@@ -62,12 +62,32 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
-    logger.info("Pipeline completed successfully.")
+
+    # Pre-flight schema compatibility check: both DataFrames must share
+    # the same column names before merging into the Gold layer.
+    assert set(df1_silver.columns) == set(df2_silver.columns), (
+        f"Schema mismatch before unionByName: "
+        f"df1_silver columns={df1_silver.columns} vs "
+        f"df2_silver columns={df2_silver.columns}"
+    )
+
+    # Use unionByName() to align columns by name rather than position,
+    # making this merge robust against schema2-style column reorderings
+    # and safe against future column additions to either source.
+    df_gold = df1_silver.unionByName(df2_silver)
+
+    # Data quality gate: confirm no rows were silently lost during the union.
+    expected_count = df1_silver.count() + df2_silver.count()
+    actual_count = df_gold.count()
+    assert actual_count == expected_count, (
+        f"Row count mismatch after unionByName: "
+        f"expected {expected_count}, got {actual_count}"
+    )
+
+    logger.info(
+        "Pipeline completed successfully. Gold layer row count: %d",
+        actual_count
+    )
     display(df_gold)
 
 except Exception as e:
