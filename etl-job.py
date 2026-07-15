@@ -16,6 +16,9 @@ if not logger.handlers:
 
 logger.propagate = False
 
+# Canonical column ordering — single source of truth for all layers
+GOLD_SCHEMA_COLUMNS = ["id", "email", "age"]
+
 logger.info("Initializing Customer Demographics ETL Job...")
 
 try:
@@ -62,11 +65,22 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # Re-order df2_silver columns to match df1_silver's canonical schema: (id, email, age)
+    # Spark's union() is position-based, so both DataFrames must share identical column
+    # positions and types before the union is performed.
+    df2_silver_aligned = df2_silver.select(*GOLD_SCHEMA_COLUMNS)
+
+    # Pre-union schema equality guard: raises AssertionError at the driver level
+    # before any distributed tasks are launched, preventing wasted executor retries
+    # on guaranteed-to-fail structural data errors.
+    assert df1_silver.schema == df2_silver_aligned.schema, (
+        f"Schema mismatch before union: df1={df1_silver.schema}, df2={df2_silver_aligned.schema}"
+    )
+
+    # Now union is safe: both DataFrames share identical column positions and types
+    df_gold = df1_silver.union(df2_silver_aligned)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
