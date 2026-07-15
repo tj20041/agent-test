@@ -62,11 +62,36 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # ------------------------------------------
+    # Pre-merge schema-consistency guard.
+    # df1_silver schema: (id, email, age)
+    # df2_silver schema: (email, age, id) -- same columns, different order.
+    # DataFrame.union() aligns columns POSITIONALLY, which would force
+    # STRING email values into the BIGINT 'id' column and raise
+    # SparkNumberFormatException [CAST_INVALID_INPUT] SQLSTATE 22018.
+    # We validate that both DataFrames expose the same set of
+    # (name, type) fields before merging, then merge BY NAME.
+    # ------------------------------------------
+    df1_fields = {(f.name, f.dataType.simpleString()) for f in df1_silver.schema.fields}
+    df2_fields = {(f.name, f.dataType.simpleString()) for f in df2_silver.schema.fields}
+
+    if df1_fields != df2_fields:
+        only_in_df1 = df1_fields - df2_fields
+        only_in_df2 = df2_fields - df1_fields
+        raise ValueError(
+            "Schema mismatch between df1_silver and df2_silver before Gold merge. "
+            f"Fields only in df1_silver: {sorted(only_in_df1)}. "
+            f"Fields only in df2_silver: {sorted(only_in_df2)}."
+        )
+
+    logger.info("Schema-consistency check passed; merging by column name...")
+
+    # Use unionByName so columns are matched by NAME, not position.
+    # This is the self-documenting, Databricks/Spark-preferred fix and
+    # resolves the [CAST_INVALID_INPUT] SparkNumberFormatException.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
