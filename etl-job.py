@@ -18,6 +18,22 @@ logger.propagate = False
 
 logger.info("Initializing Customer Demographics ETL Job...")
 
+# ==========================================
+# PRE-FLIGHT: Validate required DBFS reference files exist
+# before any Spark analysis begins.
+# ==========================================
+REFERENCE_FILE_PATH = "dbfs:/mnt/reference_data/regional_tax_rates_2026.csv"
+
+try:
+    dbutils.fs.ls(REFERENCE_FILE_PATH)
+    logger.info("Pre-flight check passed: reference file found at %s", REFERENCE_FILE_PATH)
+except Exception:
+    raise FileNotFoundError(
+        f"Pre-flight check FAILED: Reference file not found at expected DBFS path '{REFERENCE_FILE_PATH}'. "
+        "Ensure the upstream file-delivery job has completed successfully before running this ETL. "
+        "You can upload the file via: databricks fs cp local_file.csv dbfs:/mnt/reference_data/regional_tax_rates_2026.csv"
+    )
+
 try:
     # ==========================================
     # 1. SCHEMA DEFINITIONS
@@ -59,14 +75,42 @@ try:
     df2_silver = df2_bronze.filter("age >= 0")
 
     # ==========================================
-    # 4. GOLD LAYER (Integration)
+    # 4. PRE-UNION SCHEMA COMPATIBILITY VALIDATION
+    # ==========================================
+    logger.info("Validating schema compatibility before Gold layer union...")
+    df1_fields = {field.name: field.dataType for field in df1_silver.schema.fields}
+    df2_fields = {field.name: field.dataType for field in df2_silver.schema.fields}
+
+    schema_errors = []
+    for col_name, col_type in df1_fields.items():
+        if col_name not in df2_fields:
+            schema_errors.append(f"Column '{col_name}' present in df1_silver but missing from df2_silver.")
+        elif df2_fields[col_name] != col_type:
+            schema_errors.append(
+                f"Column '{col_name}' type mismatch: df1_silver has {col_type}, df2_silver has {df2_fields[col_name]}."
+            )
+    for col_name in df2_fields:
+        if col_name not in df1_fields:
+            schema_errors.append(f"Column '{col_name}' present in df2_silver but missing from df1_silver.")
+
+    if schema_errors:
+        raise ValueError(
+            "Pre-union schema validation FAILED. Incompatible schemas detected between Silver DataFrames:\n"
+            + "\n".join(schema_errors)
+        )
+    logger.info("Schema compatibility validation passed.")
+
+    # ==========================================
+    # 5. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('email')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName() instead of union() to resolve columns by name
+    # rather than position. This prevents silent data corruption caused by
+    # positional misalignment when the two Silver DataFrames have different
+    # column orderings (schema1: id, email, age vs schema2: email, age, id).
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
