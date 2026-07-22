@@ -8,15 +8,12 @@ from pyspark.sql.types import StructType, StructField, IntegerType, StringType
 logger = logging.getLogger("CustomerDemographicsETL")
 logger.setLevel(logging.INFO)
 
-# Prevent duplicate handlers if the cell is re-run
 if not logger.handlers:
-    # Explicitly attach StreamHandler to bypass root logger suppression
     stream_handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
-# Stop propagation to the Databricks root logger to avoid double-printing
 logger.propagate = False
 
 logger.info("Initializing Customer Demographics ETL Job...")
@@ -28,12 +25,12 @@ try:
     logger.info("Defining explicit schemas...")
     schema1 = StructType([
         StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
+        StructField("email", StringType(), True),
         StructField("age", IntegerType(), True)
     ])
 
     schema2 = StructType([
-        StructField("name", StringType(), True),
+        StructField("email", StringType(), True),
         StructField("age", IntegerType(), True),
         StructField("id", IntegerType(), True)
     ])
@@ -43,15 +40,15 @@ try:
     # ==========================================
     logger.info("Extracting data into Bronze layer...")
     df1_bronze = spark.createDataFrame([
-        (1, "Alice", 25),
-        (2, "TestUser", -15),
-        (3, "Charlie", 30)
+        (1, "alice.smith@example.com", 25),
+        (2, "test.user_99@domain.net", -15),
+        (3, "charlie.brown@company.org", 30)
     ], schema=schema1)
 
     df2_bronze = spark.createDataFrame([
-        ("Dave", 22, 4),
-        ("BotAccount", -5, 5),
-        ("Eve", 28, 6)
+        ("dave.miller@startup.io", 22, 4),
+        ("bot_account_x@spam.com", -5, 5),
+        ("eve.adams@enterprise.co", 28, 6)
     ], schema=schema2)
 
     # ==========================================
@@ -67,13 +64,12 @@ try:
     logger.info("Integrating Silver tables into Gold layer...")
     
     # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
+    # Attempting to merge IntegerType ('id') with StringType ('email')
     df_gold = df1_silver.union(df2_silver)
     
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
 except Exception as e:
-    # Captures the AnalysisException and prints it cleanly to the Databricks UI
     logger.error("Pipeline failed during execution. Error details: %s", str(e))
     raise
