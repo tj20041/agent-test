@@ -65,11 +65,15 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName instead of union to align columns by name rather
+    # than by position. The two DataFrames share the same column names but
+    # define them in different orders (schema1: id, name, age vs
+    # schema2: name, age, id). Positional union caused Spark to coerce the
+    # StringType 'name' column into the IntegerType 'id' column, producing a
+    # CAST_INVALID_INPUT / SparkNumberFormatException at runtime.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
