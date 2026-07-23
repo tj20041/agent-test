@@ -65,11 +65,14 @@ try:
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName() instead of union() to match columns by name
+    # rather than by position. schema1 defines columns as (id, name, age)
+    # while schema2 defines them as (name, age, id). The positional union
+    # was causing Spark to attempt casting string 'name' values (e.g. 'Alice')
+    # into BIGINT (the type of 'id'), triggering CAST_INVALID_INPUT errors.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
