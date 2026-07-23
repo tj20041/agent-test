@@ -58,18 +58,28 @@ try:
     # 3. SILVER LAYER (Transformation)
     # ==========================================
     logger.info("Filtering noisy data for Silver layer...")
+
+    # Print schemas before filtering to aid diagnosis of future schema-related issues
+    logger.info("df1_bronze schema:")
+    df1_bronze.printSchema()
     df1_silver = df1_bronze.filter("age >= 0")
+
+    logger.info("df2_bronze schema:")
+    df2_bronze.printSchema()
     df2_silver = df2_bronze.filter("age >= 0")
 
     # ==========================================
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName instead of union to merge DataFrames that share the same
+    # column names but were defined with different column orderings (schema1 has
+    # id/name/age; schema2 has name/age/id). The positional union() would misalign
+    # 'name' (StringType) with 'id' (IntegerType), causing a CAST_INVALID_INPUT
+    # SparkNumberFormatException. unionByName resolves columns by name, not position.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
