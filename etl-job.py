@@ -58,18 +58,28 @@ try:
     # 3. SILVER LAYER (Transformation)
     # ==========================================
     logger.info("Filtering noisy data for Silver layer...")
+    logger.info("df1_silver schema:")
+    df1_bronze.printSchema()
     df1_silver = df1_bronze.filter("age >= 0")
+
+    logger.info("df2_silver schema:")
+    df2_bronze.printSchema()
     df2_silver = df2_bronze.filter("age >= 0")
 
     # ==========================================
     # 4. GOLD LAYER (Integration)
     # ==========================================
     logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
-    df_gold = df1_silver.union(df2_silver)
-    
+
+    # FIX: Use unionByName instead of union to align columns by name rather
+    # than by position. schema1 defines columns as (id, name, age) while
+    # schema2 defines them as (name, age, id). A positional union would
+    # incorrectly pair the StringType 'name' column from df2_silver with the
+    # IntegerType 'id' column from df1_silver, causing a CAST_INVALID_INPUT
+    # SparkNumberFormatException. unionByName resolves columns by their names,
+    # ensuring correct alignment regardless of schema column ordering.
+    df_gold = df1_silver.unionByName(df2_silver)
+
     logger.info("Pipeline completed successfully.")
     display(df_gold)
 
