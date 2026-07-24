@@ -2,8 +2,9 @@
 # ERROR: SparkException with "java.lang.OutOfMemoryError" or "Shuffle memory limit exceeded"
 # Expected log error: "SparkException: Job aborted due to stage failure" and "OutOfMemoryError"
 
-from pyspark.sql.functions import col, explode, split, concat, lit, when, rand, struct
+from pyspark.sql.functions import col, explode, split, concat, lit, when, rand, struct, sum, avg, count, collect_list, udf, row_number
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, ArrayType
+from pyspark.sql.window import Window
 import random
 
 # Generate large dataset with skewed data
@@ -34,12 +35,19 @@ df.cache().count()
 
 # Multiple joins with skewed data
 df1 = df.withColumnRenamed("key", "key1")
-df2 = df.withColumnRenamed("key", "key2")
+# Renamed conflicting columns in df2 to avoid ambiguity after join
+df2 = df.withColumnRenamed("key", "key2") \
+        .withColumnRenamed("value", "value_df2") \
+        .withColumnRenamed("count", "count_df2") \
+        .withColumnRenamed("price", "price_df2") \
+        .withColumnRenamed("group", "group_df2") \
+        .withColumnRenamed("items", "items_df2")
 
 # Join on skewed key - will cause data skew in shuffle
 joined_df = df1.join(df2, df1.key1 == df2.key2, "inner")
 
 # Explode the arrays - multiplies data
+# 'value', 'count', 'price', 'group', 'items' are now unambiguously from df1
 exploded_df = joined_df.select(
     col("key1"),
     col("value"),
