@@ -1,79 +1,61 @@
-import logging
-import sys
-from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+# Databricks Notebook - Test Case 1
+# ERROR: NullPointerException in UDF when processing null values
+# Expected log error: "java.lang.NullPointerException" or "PythonException: An exception was thrown from the UDF"
 
-# ==========================================
-# 0. DATABRICKS-SAFE LOGGING SETUP
-# ==========================================
-logger = logging.getLogger("CustomerDemographicsETL")
-logger.setLevel(logging.INFO)
+from pyspark.sql.functions import udf, col, when
+from pyspark.sql.types import StringType, IntegerType, DoubleType
+import pandas as pd
 
-# Prevent duplicate handlers if the cell is re-run
-if not logger.handlers:
-    # Explicitly attach StreamHandler to bypass root logger suppression
-    stream_handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+# Create data with nulls in critical columns
+data = [
+    (1, "Product_A", 100.50, "Electronics", "2024-01-01"),
+    (2, "Product_B", None, "Clothing", "2024-01-02"),  # Null price
+    (3, "Product_C", 250.00, None, "2024-01-03"),      # Null category
+    (4, None, 300.00, "Electronics", None),            # Null name and date
+    (5, "Product_E", 450.50, "Clothing", "2024-01-05")
+]
 
-# Stop propagation to the Databricks root logger to avoid double-printing
-logger.propagate = False
+df = spark.createDataFrame(data, ["id", "product_name", "price", "category", "date"])
 
-logger.info("Initializing Customer Demographics ETL Job...")
+# ERROR: UDF that doesn't handle nulls
+@udf(returnType=DoubleType())
+def calculate_discount(price, category):
+    # This will throw NullPointerException when price or category is None
+    if category.upper() == "ELECTRONICS":
+        discount = price * 0.20  # price is None for row 2 - will cause NPE
+    elif category.upper() == "CLOTHING":
+        discount = price * 0.15
+    else:
+        discount = price * 0.10
+    return discount
 
-try:
-    # ==========================================
-    # 1. SCHEMA DEFINITIONS
-    # ==========================================
-    logger.info("Defining explicit schemas...")
-    schema1 = StructType([
-        StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
-        StructField("age", IntegerType(), True)
-    ])
+# Apply UDF - will fail at row with null values
+df_with_discount = df.withColumn(
+    "discount_amount",
+    calculate_discount(col("price"), col("category"))
+)
 
-    schema2 = StructType([
-        StructField("name", StringType(), True),
-        StructField("age", IntegerType(), True),
-        StructField("id", IntegerType(), True)
-    ])
+# Another UDF with similar issue but different null scenario
+@udf(returnType=StringType())
+def categorize_product(product_name, price):
+    # Null check missing for price
+    if price > 200 and product_name is not None:
+        return "PREMIUM_" + product_name.upper()
+    elif price <= 200 and product_name is not None:
+        return "STANDARD_" + product_name.upper()
+    else:
+        # This branch will cause NPE when product_name is None
+        return product_name.upper() + "_UNKNOWN"  # product_name.upper() fails if None
 
-    # ==========================================
-    # 2. BRONZE LAYER (Extraction)
-    # ==========================================
-    logger.info("Extracting data into Bronze layer...")
-    df1_bronze = spark.createDataFrame([
-        (1, "Alice", 25),
-        (2, "TestUser", -15),
-        (3, "Charlie", 30)
-    ], schema=schema1)
+df_final = df_with_discount.withColumn(
+    "product_category",
+    categorize_product(col("product_name"), col("discount_amount"))
+)
 
-    df2_bronze = spark.createDataFrame([
-        ("Dave", 22, 4),
-        ("BotAccount", -5, 5),
-        ("Eve", 28, 6)
-    ], schema=schema2)
+# Force execution - will throw NullPointerException
+df_final.show()
 
-    # ==========================================
-    # 3. SILVER LAYER (Transformation)
-    # ==========================================
-    logger.info("Filtering noisy data for Silver layer...")
-    df1_silver = df1_bronze.filter("age >= 0")
-    df2_silver = df2_bronze.filter("age >= 0")
-
-    # ==========================================
-    # 4. GOLD LAYER (Integration)
-    # ==========================================
-    logger.info("Integrating Silver tables into Gold layer...")
-    
-    # INTENTIONAL ERROR: 
-    # Attempting to merge IntegerType ('id') with StringType ('name')
-    df_gold = df1_silver.union(df2_silver)
-    
-    logger.info("Pipeline completed successfully.")
-    display(df_gold)
-
-except Exception as e:
-    # Captures the AnalysisException and prints it cleanly to the Databricks UI
-    logger.error("Pipeline failed during execution. Error details: %s", str(e))
-    raise
+# Additional processing that will fail
+df_final.groupBy("category").agg(
+    sum("discount_amount").alias("total_discount")
+).show()
