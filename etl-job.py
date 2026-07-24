@@ -2,7 +2,7 @@
 # ERROR: ArithmeticException when dividing by zero in window calculations
 # Expected log error: "java.lang.ArithmeticException: / by zero" or "Division by zero"
 
-from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when
+from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when, nullif
 from pyspark.sql.window import Window
 
 # Create sales data with zero values
@@ -33,11 +33,11 @@ df_with_metrics = df.withColumn(
 ).withColumn(
     # This will cause division by zero when amount is 0
     "ratio_to_avg",
-    col("amount") / col("running_avg_amount")  # Division by zero
+    col("amount") / nullif(col("running_avg_amount"), 0)  # Division by zero handled with nullif
 ).withColumn(
     # Another division by zero
     "quantity_ratio",
-    col("quantity") / col("running_avg_quantity")  # Division by zero
+    col("quantity") / nullif(col("running_avg_quantity"), 0)  # Division by zero handled with nullif
 )
 
 # Additional calculation that will also fail
@@ -50,7 +50,7 @@ df_with_metrics = df_with_metrics.withColumn(
 # Add more window functions that cause division issues
 df_with_metrics = df_with_metrics.withColumn(
     "growth_rate",
-    (col("amount") - lag("amount", 1).over(window_spec)) / lag("amount", 1).over(window_spec)
+    (col("amount") - lag("amount", 1).over(window_spec)) / nullif(lag("amount", 1).over(window_spec), 0) # Division by zero handled with nullif
 )
 
 # Force execution - will throw ArithmeticException
@@ -62,7 +62,7 @@ result = df_with_metrics.groupBy("store").agg(
     sum("quantity").alias("total_quantity")
 ).withColumn(
     "avg_price",
-    col("total_amount") / col("total_quantity")  # Division by zero for stores with zero quantity
+    col("total_amount") / nullif(col("total_quantity"), 0)  # Division by zero for stores with zero quantity handled with nullif
 )
 
 result.show()
