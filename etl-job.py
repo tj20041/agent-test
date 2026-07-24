@@ -1,61 +1,68 @@
-# Databricks Notebook - Test Case 1
-# ERROR: NullPointerException in UDF when processing null values
-# Expected log error: "java.lang.NullPointerException" or "PythonException: An exception was thrown from the UDF"
+# Databricks Notebook - Test Case 2
+# ERROR: ArithmeticException when dividing by zero in window calculations
+# Expected log error: "java.lang.ArithmeticException: / by zero" or "Division by zero"
 
-from pyspark.sql.functions import udf, col, when
-from pyspark.sql.types import StringType, IntegerType, DoubleType
-import pandas as pd
+from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when
+from pyspark.sql.window import Window
 
-# Create data with nulls in critical columns
-data = [
-    (1, "Product_A", 100.50, "Electronics", "2024-01-01"),
-    (2, "Product_B", None, "Clothing", "2024-01-02"),  # Null price
-    (3, "Product_C", 250.00, None, "2024-01-03"),      # Null category
-    (4, None, 300.00, "Electronics", None),            # Null name and date
-    (5, "Product_E", 450.50, "Clothing", "2024-01-05")
+# Create sales data with zero values
+sales_data = [
+    (1, "Store_A", "2024-01-01", 5, 1000.00),
+    (2, "Store_A", "2024-01-02", 3, 500.00),
+    (3, "Store_A", "2024-01-03", 0, 0.00),      # Zero quantity and amount
+    (4, "Store_B", "2024-01-01", 8, 2000.00),
+    (5, "Store_B", "2024-01-02", 0, 0.00),      # Zero quantity and amount
+    (6, "Store_B", "2024-01-03", 4, 800.00),
+    (7, "Store_C", "2024-01-01", 2, 300.00),
+    (8, "Store_C", "2024-01-02", 1, 100.00),
+    (9, "Store_C", "2024-01-03", 3, 600.00)
 ]
 
-df = spark.createDataFrame(data, ["id", "product_name", "price", "category", "date"])
+df = spark.createDataFrame(sales_data, ["id", "store", "date", "quantity", "amount"])
 
-# ERROR: UDF that doesn't handle nulls
-@udf(returnType=DoubleType())
-def calculate_discount(price, category):
-    # This will throw NullPointerException when price or category is None
-    if category.upper() == "ELECTRONICS":
-        discount = price * 0.20  # price is None for row 2 - will cause NPE
-    elif category.upper() == "CLOTHING":
-        discount = price * 0.15
-    else:
-        discount = price * 0.10
-    return discount
+# Create window specification
+window_spec = Window.partitionBy("store").orderBy("date")
 
-# Apply UDF - will fail at row with null values
-df_with_discount = df.withColumn(
-    "discount_amount",
-    calculate_discount(col("price"), col("category"))
+# ERROR: Division by zero in window function
+df_with_metrics = df.withColumn(
+    "running_avg_quantity",
+    avg("quantity").over(window_spec)
+).withColumn(
+    "running_avg_amount",
+    avg("amount").over(window_spec)
+).withColumn(
+    # This will cause division by zero when amount is 0
+    "ratio_to_avg",
+    col("amount") / col("running_avg_amount")  # Division by zero
+).withColumn(
+    # Another division by zero
+    "quantity_ratio",
+    col("quantity") / col("running_avg_quantity")  # Division by zero
 )
 
-# Another UDF with similar issue but different null scenario
-@udf(returnType=StringType())
-def categorize_product(product_name, price):
-    # Null check missing for price
-    if price > 200 and product_name is not None:
-        return "PREMIUM_" + product_name.upper()
-    elif price <= 200 and product_name is not None:
-        return "STANDARD_" + product_name.upper()
-    else:
-        # This branch will cause NPE when product_name is None
-        return product_name.upper() + "_UNKNOWN"  # product_name.upper() fails if None
-
-df_final = df_with_discount.withColumn(
-    "product_category",
-    categorize_product(col("product_name"), col("discount_amount"))
+# Additional calculation that will also fail
+df_with_metrics = df_with_metrics.withColumn(
+    "avg_price_per_unit",
+    when(col("quantity") > 0, col("amount") / col("quantity"))
+    .otherwise(0)  # This returns 0 for division by zero, but the window function above already fails
 )
 
-# Force execution - will throw NullPointerException
-df_final.show()
+# Add more window functions that cause division issues
+df_with_metrics = df_with_metrics.withColumn(
+    "growth_rate",
+    (col("amount") - lag("amount", 1).over(window_spec)) / lag("amount", 1).over(window_spec)
+)
 
-# Additional processing that will fail
-df_final.groupBy("category").agg(
-    sum("discount_amount").alias("total_discount")
-).show()
+# Force execution - will throw ArithmeticException
+df_with_metrics.show()
+
+# Group by with division that will also fail
+result = df_with_metrics.groupBy("store").agg(
+    sum("amount").alias("total_amount"),
+    sum("quantity").alias("total_quantity")
+).withColumn(
+    "avg_price",
+    col("total_amount") / col("total_quantity")  # Division by zero for stores with zero quantity
+)
+
+result.show()
