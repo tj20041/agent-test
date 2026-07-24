@@ -1,68 +1,108 @@
-# Databricks Notebook - Test Case 2
-# ERROR: ArithmeticException when dividing by zero in window calculations
-# Expected log error: "java.lang.ArithmeticException: / by zero" or "Division by zero"
+# Databricks Notebook - Test Case 3
+# ERROR: SparkException with "java.lang.OutOfMemoryError" or "Shuffle memory limit exceeded"
+# Expected log error: "SparkException: Job aborted due to stage failure" and "OutOfMemoryError"
 
-from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when
-from pyspark.sql.window import Window
+from pyspark.sql.functions import col, explode, split, concat, lit, when, rand, struct
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, ArrayType
+import random
 
-# Create sales data with zero values
-sales_data = [
-    (1, "Store_A", "2024-01-01", 5, 1000.00),
-    (2, "Store_A", "2024-01-02", 3, 500.00),
-    (3, "Store_A", "2024-01-03", 0, 0.00),      # Zero quantity and amount
-    (4, "Store_B", "2024-01-01", 8, 2000.00),
-    (5, "Store_B", "2024-01-02", 0, 0.00),      # Zero quantity and amount
-    (6, "Store_B", "2024-01-03", 4, 800.00),
-    (7, "Store_C", "2024-01-01", 2, 300.00),
-    (8, "Store_C", "2024-01-02", 1, 100.00),
-    (9, "Store_C", "2024-01-03", 3, 600.00)
-]
+# Generate large dataset with skewed data
+def generate_skewed_data(spark, num_records=500000):
+    data = []
+    for i in range(num_records):
+        # Create data skew - 90% of data goes to 10% of keys
+        if i < 450000:  # 90% of data
+            key = random.randint(1, 10)  # Only 10 keys get 90% of data
+        else:
+            key = random.randint(11, 1000)  # Remaining keys get 10% of data
+        
+        data.append((
+            key,
+            f"value_{i}",
+            random.randint(1, 100),
+            round(random.uniform(10, 1000), 2),
+            f"group_{key % 50}",
+            [f"item_{j}" for j in range(random.randint(1, 100))]  # Variable size arrays
+        ))
+    return spark.createDataFrame(data, ["key", "value", "count", "price", "group", "items"])
 
-df = spark.createDataFrame(sales_data, ["id", "store", "date", "quantity", "amount"])
+df = generate_skewed_data(spark, 300000)
+df.cache().count()
 
-# Create window specification
-window_spec = Window.partitionBy("store").orderBy("date")
+# ERROR: Massive shuffling due to skewed data
+# This will cause shuffle memory issues
 
-# ERROR: Division by zero in window function
-df_with_metrics = df.withColumn(
-    "running_avg_quantity",
-    avg("quantity").over(window_spec)
-).withColumn(
-    "running_avg_amount",
-    avg("amount").over(window_spec)
-).withColumn(
-    # This will cause division by zero when amount is 0
-    "ratio_to_avg",
-    col("amount") / col("running_avg_amount")  # Division by zero
-).withColumn(
-    # Another division by zero
-    "quantity_ratio",
-    col("quantity") / col("running_avg_quantity")  # Division by zero
+# Multiple joins with skewed data
+df1 = df.withColumnRenamed("key", "key1")
+df2 = df.withColumnRenamed("key", "key2")
+
+# Join on skewed key - will cause data skew in shuffle
+joined_df = df1.join(df2, df1.key1 == df2.key2, "inner")
+
+# Explode the arrays - multiplies data
+exploded_df = joined_df.select(
+    col("key1"),
+    col("value"),
+    col("count"),
+    col("price"),
+    col("group"),
+    explode(col("items")).alias("item")
 )
 
-# Additional calculation that will also fail
-df_with_metrics = df_with_metrics.withColumn(
-    "avg_price_per_unit",
-    when(col("quantity") > 0, col("amount") / col("quantity"))
-    .otherwise(0)  # This returns 0 for division by zero, but the window function above already fails
+# Multiple aggregations on skewed data
+result1 = exploded_df.groupBy("key1", "group").agg(
+    sum("count").alias("total_count"),
+    sum("price").alias("total_price"),
+    avg("price").alias("avg_price"),
+    count("item").alias("item_count"),
+    collect_list("item").alias("items_list")
 )
 
-# Add more window functions that cause division issues
-df_with_metrics = df_with_metrics.withColumn(
-    "growth_rate",
-    (col("amount") - lag("amount", 1).over(window_spec)) / lag("amount", 1).over(window_spec)
+# Another join with itself
+result2 = result1.join(
+    result1.withColumnRenamed("total_count", "total_count2"),
+    result1.key1 == result1.withColumnRenamed("total_count", "total_count2").key1,
+    "inner"
 )
 
-# Force execution - will throw ArithmeticException
-df_with_metrics.show()
-
-# Group by with division that will also fail
-result = df_with_metrics.groupBy("store").agg(
-    sum("amount").alias("total_amount"),
-    sum("quantity").alias("total_quantity")
+# Window functions on skewed data
+window_spec = Window.partitionBy("key1").orderBy(col("total_price").desc())
+result3 = result2.withColumn(
+    "rank_by_price",
+    row_number().over(window_spec)
 ).withColumn(
-    "avg_price",
-    col("total_amount") / col("total_quantity")  # Division by zero for stores with zero quantity
+    "cumulative_sum",
+    sum("total_price").over(Window.partitionBy("key1").orderBy("total_price"))
 )
 
-result.show()
+# Another repartition causing more shuffling
+result4 = result3.repartition(1000, "key1")
+
+# Complex UDF that creates more memory pressure
+@udf(returnType=ArrayType(StringType()))
+def process_items(items):
+    # This will create large intermediate arrays
+    result = []
+    for item in items:
+        for i in range(10):  # Multiply data even more
+            result.append(f"{item}_{i}")
+    return result
+
+result5 = result4.withColumn(
+    "processed_items",
+    process_items(col("items_list"))
+)
+
+# Explode again
+final_df = result5.select(
+    col("key1"),
+    col("group"),
+    col("total_price"),
+    explode(col("processed_items")).alias("processed_item")
+)
+
+# Force execution - will cause OutOfMemoryError
+final_df.count()
+
+# Additional collect will cause driver OOM
+all_data = final_df.collect()
