@@ -2,9 +2,9 @@
 # ERROR: NullPointerException in UDF when processing null values
 # Expected log error: "java.lang.NullPointerException" or "PythonException: An exception was thrown from the UDF"
 
-from pyspark.sql.functions import udf, col, when
+from pyspark.sql.functions import col, when, upper, lit, concat, sum
 from pyspark.sql.types import StringType, IntegerType, DoubleType
-import pandas as pd
+import pandas as pd # pandas is not used for the fix but might be for other parts of the script
 
 # Create data with nulls in critical columns
 data = [
@@ -17,45 +17,29 @@ data = [
 
 df = spark.createDataFrame(data, ["id", "product_name", "price", "category", "date"])
 
-# ERROR: UDF that doesn't handle nulls
-@udf(returnType=DoubleType())
-def calculate_discount(price, category):
-    # This will throw NullPointerException when price or category is None
-    if category.upper() == "ELECTRONICS":
-        discount = price * 0.20  # price is None for row 2 - will cause NPE
-    elif category.upper() == "CLOTHING":
-        discount = price * 0.15
-    else:
-        discount = price * 0.10
-    return discount
-
-# Apply UDF - will fail at row with null values
+# FIX: Refactor calculate_discount to use native Spark SQL functions for null-safe operations
+# and improved performance. This replaces the problematic UDF that caused TypeError.
 df_with_discount = df.withColumn(
     "discount_amount",
-    calculate_discount(col("price"), col("category"))
+    when(upper(col("category")) == "ELECTRONICS", col("price") * 0.20)
+    .when(upper(col("category")) == "CLOTHING", col("price") * 0.15)
+    .otherwise(col("price") * 0.10) # Handles other categories and null categories correctly
 )
 
-# Another UDF with similar issue but different null scenario
-@udf(returnType=StringType())
-def categorize_product(product_name, price):
-    # Null check missing for price
-    if price > 200 and product_name is not None:
-        return "PREMIUM_" + product_name.upper()
-    elif price <= 200 and product_name is not None:
-        return "STANDARD_" + product_name.upper()
-    else:
-        # This branch will cause NPE when product_name is None
-        return product_name.upper() + "_UNKNOWN"  # product_name.upper() fails if None
-
+# FIX: Refactor categorize_product to use native Spark SQL functions for null-safe operations
+# and improved performance. This replaces the problematic UDF.
 df_final = df_with_discount.withColumn(
     "product_category",
-    categorize_product(col("product_name"), col("discount_amount"))
+    when(col("product_name").isNull(), lit("UNKNOWN_PRODUCT_NAME"))
+    .when(col("discount_amount").isNull(), lit("PRICE_UNDETERMINED"))
+    .when(col("discount_amount") > 200, concat(lit("PREMIUM_"), upper(col("product_name"))))
+    .otherwise(concat(lit("STANDARD_"), upper(col("product_name"))))
 )
 
-# Force execution - will throw NullPointerException
+# Force execution - now should pass without TypeError or PythonException
 df_final.show()
 
-# Additional processing that will fail
+# Additional processing that will now work correctly
 df_final.groupBy("category").agg(
     sum("discount_amount").alias("total_discount")
 ).show()
