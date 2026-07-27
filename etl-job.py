@@ -1,108 +1,178 @@
-# Databricks Notebook - Test Case 3
-# ERROR: SparkException with "java.lang.OutOfMemoryError" or "Shuffle memory limit exceeded"
-# Expected log error: "SparkException: Job aborted due to stage failure" and "OutOfMemoryError"
+# Databricks Notebook - Test Case 5
+# ERROR: SparkException with "Python worker failed to connect back" or "Python exception" 
+# Expected log error: "PicklingError" or "PythonException" or "ValueError"
 
-from pyspark.sql.functions import col, explode, split, concat, lit, when, rand, struct
+from pyspark.sql.functions import udf, col, struct, array
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, ArrayType
-import random
+import pickle
+import sys
 
-# Generate large dataset with skewed data
-def generate_skewed_data(spark, num_records=500000):
-    data = []
-    for i in range(num_records):
-        # Create data skew - 90% of data goes to 10% of keys
-        if i < 450000:  # 90% of data
-            key = random.randint(1, 10)  # Only 10 keys get 90% of data
-        else:
-            key = random.randint(11, 1000)  # Remaining keys get 10% of data
-        
-        data.append((
-            key,
-            f"value_{i}",
-            random.randint(1, 100),
-            round(random.uniform(10, 1000), 2),
-            f"group_{key % 50}",
-            [f"item_{j}" for j in range(random.randint(1, 100))]  # Variable size arrays
-        ))
-    return spark.createDataFrame(data, ["key", "value", "count", "price", "group", "items"])
+# Create data
+data = [
+    (1, "A", 100.0, ["x", "y", "z"]),
+    (2, "B", 200.0, ["a", "b"]),
+    (3, "C", 300.0, ["m", "n", "o", "p"]),
+    (4, "D", 400.0, ["q", "r"]),
+    (5, "E", 500.0, ["s", "t", "u"])
+]
 
-df = generate_skewed_data(spark, 300000)
-df.cache().count()
+df = spark.createDataFrame(data, ["id", "code", "value", "items"])
 
-# ERROR: Massive shuffling due to skewed data
-# This will cause shuffle memory issues
+# ERROR 1: UDF that tries to use unpickleable objects
+class CustomProcessor:
+    def __init__(self, threshold):
+        self.threshold = threshold
+        self.cache = {}
+    
+    def process(self, value):
+        # This object can't be pickled
+        return value * self.threshold
 
-# Multiple joins with skewed data
-df1 = df.withColumnRenamed("key", "key1")
-df2 = df.withColumnRenamed("key", "key2")
+processor = CustomProcessor(1.5)
 
-# Join on skewed key - will cause data skew in shuffle
-joined_df = df1.join(df2, df1.key1 == df2.key2, "inner")
+@udf(returnType=DoubleType())
+def process_value(value):
+    # This will fail when trying to serialize processor
+    return processor.process(value)  # processor can't be pickled
 
-# Explode the arrays - multiplies data
-exploded_df = joined_df.select(
-    col("key1"),
-    col("value"),
-    col("count"),
-    col("price"),
-    col("group"),
-    explode(col("items")).alias("item")
+df1 = df.withColumn(
+    "processed_value",
+    process_value(col("value"))
 )
 
-# Multiple aggregations on skewed data
-result1 = exploded_df.groupBy("key1", "group").agg(
-    sum("count").alias("total_count"),
-    sum("price").alias("total_price"),
-    avg("price").alias("avg_price"),
-    count("item").alias("item_count"),
-    collect_list("item").alias("items_list")
-)
-
-# Another join with itself
-result2 = result1.join(
-    result1.withColumnRenamed("total_count", "total_count2"),
-    result1.key1 == result1.withColumnRenamed("total_count", "total_count2").key1,
-    "inner"
-)
-
-# Window functions on skewed data
-window_spec = Window.partitionBy("key1").orderBy(col("total_price").desc())
-result3 = result2.withColumn(
-    "rank_by_price",
-    row_number().over(window_spec)
-).withColumn(
-    "cumulative_sum",
-    sum("total_price").over(Window.partitionBy("key1").orderBy("total_price"))
-)
-
-# Another repartition causing more shuffling
-result4 = result3.repartition(1000, "key1")
-
-# Complex UDF that creates more memory pressure
+# ERROR 2: UDF with nested functions and closures
 @udf(returnType=ArrayType(StringType()))
 def process_items(items):
-    # This will create large intermediate arrays
-    result = []
-    for item in items:
-        for i in range(10):  # Multiply data even more
-            result.append(f"{item}_{i}")
+    # Nested function with closure
+    def inner_process(item):
+        # This creates complex closure that can't be pickled
+        return item.upper() + "_" + str(len(item))
+    
+    # Lambda with complex closure
+    result = list(map(lambda x: inner_process(x), items))
     return result
 
-result5 = result4.withColumn(
+df2 = df1.withColumn(
     "processed_items",
-    process_items(col("items_list"))
+    process_items(col("items"))
 )
 
-# Explode again
-final_df = result5.select(
-    col("key1"),
-    col("group"),
-    col("total_price"),
-    explode(col("processed_items")).alias("processed_item")
+# ERROR 3: UDF using non-serializable module-level variables
+MODULE_CONFIG = {
+    "mode": "strict",
+    "threshold": 0.75,
+    "mapping": {"A": 1, "B": 2, "C": 3, "D": 4}
+}
+
+@udf(returnType=StringType())
+def apply_config(code, value):
+    # Uses module-level dict that might not pickle properly
+    mapping = MODULE_CONFIG["mapping"]
+    mode = MODULE_CONFIG["mode"]
+    threshold = MODULE_CONFIG["threshold"]
+    
+    # Complex logic using external data
+    if code in mapping:
+        mapped_value = mapping[code]
+        if value > threshold * 100:
+            return f"{mode}_{mapped_value}_{code}"
+        else:
+            return f"{mode}_low_{mapped_value}"
+    else:
+        return "unknown"
+
+df3 = df2.withColumn(
+    "config_result",
+    apply_config(col("code"), col("processed_value"))
 )
 
-# Force execution - will cause OutOfMemoryError
-final_df.count()
+# ERROR 4: UDF with generator functions
+@udf(returnType=ArrayType(DoubleType()))
+def generate_sequence(value):
+    # Generator that yields values
+    def gen():
+        for i in range(10):
+            yield value * i
+    
+    # Converting generator to list - may fail in distributed context
+    return list(gen())
 
-# Additional collect will cause driver OOM
-all_data = final_df.collect()
+df4 = df3.withColumn(
+    "sequence",
+    generate_sequence(col("processed_value"))
+)
+
+# ERROR 5: UDF with external library imports inside nested scope
+@udf(returnType=DoubleType())
+def calculate_statistics(items):
+    # Import inside function might fail in distributed execution
+    import statistics
+    import numpy as np  # numpy might not be available
+    
+    try:
+        # Complex statistics that might fail
+        mean = statistics.mean(items)
+        # This might fail if numpy not available
+        std = np.std(items)
+        return mean / std
+    except:
+        return None
+
+df5 = df4.withColumn(
+    "stats_result",
+    calculate_statistics(col("processed_items"))
+)
+
+# ERROR 6: UDF with multiple return types
+@udf(returnType=StringType())
+def complex_processing(value, code):
+    # This returns different types - will cause serialization issues
+    if value > 200:
+        return {"status": "high", "value": value}  # Returns dict
+    elif code == "B":
+        return [value, code, value * 2]  # Returns list
+    else:
+        return value  # Returns float
+
+df6 = df5.withColumn(
+    "complex_result",
+    complex_processing(col("processed_value"), col("code"))
+)
+
+# ERROR 7: UDF with recursive function that has external reference
+external_list = [1, 2, 3, 4, 5]
+
+@udf(returnType=DoubleType())
+def recursive_sum(n):
+    def rec_helper(x):
+        # References external_list - will fail to pickle
+        if x == 0:
+            return sum(external_list)
+        return x + rec_helper(x - 1)
+    return rec_helper(int(n))
+
+df7 = df6.withColumn(
+    "recursive_sum_result",
+    recursive_sum(col("value"))
+)
+
+# ERROR 8: UDF trying to access filesystem
+@udf(returnType=StringType())
+def read_config(id):
+    # Trying to read file in UDF - will fail
+    with open("/dbfs/mnt/config/config.txt", "r") as f:
+        config = f.read()
+    return config
+
+df8 = df7.withColumn(
+    "config_data",
+    read_config(col("id"))
+)
+
+# Force execution - will cause Python pickling/serialization errors
+df8.show()
+
+# Additional operation that will fail
+df8.groupBy("code").agg(
+    collect_list("complex_result").alias("results")
+).show()
