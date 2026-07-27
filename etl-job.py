@@ -1,8 +1,8 @@
 # Databricks Notebook - Test Case 2
-# ERROR: ArithmeticException when dividing by zero in window calculations
-# Expected log error: "java.lang.ArithmeticException: / by zero" or "Division by zero"
+# FIXED: Guarded all division operations against zero divisors to avoid
+# SparkArithmeticException [DIVIDE_BY_ZERO] under ANSI SQL mode.
 
-from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when
+from pyspark.sql.functions import col, sum, avg, row_number, rank, lag, lead, when, lit
 from pyspark.sql.window import Window
 
 # Create sales data with zero values
@@ -23,7 +23,8 @@ df = spark.createDataFrame(sales_data, ["id", "store", "date", "quantity", "amou
 # Create window specification
 window_spec = Window.partitionBy("store").orderBy("date")
 
-# ERROR: Division by zero in window function
+# FIXED: Guarded division in window function calculations - avoid divide-by-zero
+# by checking the denominator with when()/otherwise() before dividing.
 df_with_metrics = df.withColumn(
     "running_avg_quantity",
     avg("quantity").over(window_spec)
@@ -31,38 +32,44 @@ df_with_metrics = df.withColumn(
     "running_avg_amount",
     avg("amount").over(window_spec)
 ).withColumn(
-    # This will cause division by zero when amount is 0
+    # FIXED: null-safe ratio_to_avg - returns NULL instead of raising when
+    # running_avg_amount is 0
     "ratio_to_avg",
-    col("amount") / col("running_avg_amount")  # Division by zero
+    when(col("running_avg_amount") != 0, col("amount") / col("running_avg_amount")).otherwise(None)
 ).withColumn(
-    # Another division by zero
+    # FIXED: null-safe quantity_ratio - returns NULL instead of raising when
+    # running_avg_quantity is 0
     "quantity_ratio",
-    col("quantity") / col("running_avg_quantity")  # Division by zero
+    when(col("running_avg_quantity") != 0, col("quantity") / col("running_avg_quantity")).otherwise(None)
 )
 
-# Additional calculation that will also fail
+# Additional calculation - already null-safe using when()/otherwise()
 df_with_metrics = df_with_metrics.withColumn(
     "avg_price_per_unit",
     when(col("quantity") > 0, col("amount") / col("quantity"))
-    .otherwise(0)  # This returns 0 for division by zero, but the window function above already fails
+    .otherwise(0)
 )
 
-# Add more window functions that cause division issues
+# FIXED: growth_rate now guards against a zero (or null) previous amount value
+prev_amount = lag("amount", 1).over(window_spec)
 df_with_metrics = df_with_metrics.withColumn(
     "growth_rate",
-    (col("amount") - lag("amount", 1).over(window_spec)) / lag("amount", 1).over(window_spec)
+    when(
+        prev_amount.isNotNull() & (prev_amount != 0),
+        (col("amount") - prev_amount) / prev_amount
+    ).otherwise(None)
 )
 
-# Force execution - will throw ArithmeticException
+# Force execution - no longer throws ArithmeticException
 df_with_metrics.show()
 
-# Group by with division that will also fail
+# Group by with null-safe division to avoid divide-by-zero for stores with zero quantity
 result = df_with_metrics.groupBy("store").agg(
     sum("amount").alias("total_amount"),
     sum("quantity").alias("total_quantity")
 ).withColumn(
     "avg_price",
-    col("total_amount") / col("total_quantity")  # Division by zero for stores with zero quantity
+    when(col("total_quantity") != 0, col("total_amount") / col("total_quantity")).otherwise(None)
 )
 
 result.show()
