@@ -1,100 +1,108 @@
-# Databricks Notebook - Test Case 4
-# ERROR: AnalysisException with "cannot resolve 'column_name'"
-# Expected log error: "AnalysisException: cannot resolve 'xxx' given input columns"
+# Databricks Notebook - Test Case 3
+# ERROR: SparkException with "java.lang.OutOfMemoryError" or "Shuffle memory limit exceeded"
+# Expected log error: "SparkException: Job aborted due to stage failure" and "OutOfMemoryError"
 
-from pyspark.sql.functions import col, sum, avg, count, max, min, when, struct, array, lit
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
+from pyspark.sql.functions import col, explode, split, concat, lit, when, rand, struct
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, ArrayType
+import random
 
-# Create initial dataset
-data = [
-    (1, "John", "Sales", 75000.00, "2024-01-01", 5, 3),
-    (2, "Jane", "Marketing", 85000.00, "2024-01-02", 3, 2),
-    (3, "Bob", "Engineering", 95000.00, "2024-01-03", 7, 4),
-    (4, "Alice", "Finance", 65000.00, "2024-01-04", 2, 1),
-    (5, "Charlie", "Sales", 70000.00, "2024-01-05", 4, 3)
-]
+# Generate large dataset with skewed data
+def generate_skewed_data(spark, num_records=500000):
+    data = []
+    for i in range(num_records):
+        # Create data skew - 90% of data goes to 10% of keys
+        if i < 450000:  # 90% of data
+            key = random.randint(1, 10)  # Only 10 keys get 90% of data
+        else:
+            key = random.randint(11, 1000)  # Remaining keys get 10% of data
+        
+        data.append((
+            key,
+            f"value_{i}",
+            random.randint(1, 100),
+            round(random.uniform(10, 1000), 2),
+            f"group_{key % 50}",
+            [f"item_{j}" for j in range(random.randint(1, 100))]  # Variable size arrays
+        ))
+    return spark.createDataFrame(data, ["key", "value", "count", "price", "group", "items"])
 
-df = spark.createDataFrame(data, ["emp_id", "name", "dept", "salary", "hire_date", "projects", "years"])
+df = generate_skewed_data(spark, 300000)
+df.cache().count()
 
-# ERROR: Reference to non-existent column in multiple places
+# ERROR: Massive shuffling due to skewed data
+# This will cause shuffle memory issues
 
-# 1. Non-existent column in withColumn
-df1 = df.withColumn(
-    "bonus",
-    col("salary") * col("bonus_rate")  # bonus_rate doesn't exist
+# Multiple joins with skewed data
+df1 = df.withColumnRenamed("key", "key1")
+df2 = df.withColumnRenamed("key", "key2")
+
+# Join on skewed key - will cause data skew in shuffle
+joined_df = df1.join(df2, df1.key1 == df2.key2, "inner")
+
+# Explode the arrays - multiplies data
+exploded_df = joined_df.select(
+    col("key1"),
+    col("value"),
+    col("count"),
+    col("price"),
+    col("group"),
+    explode(col("items")).alias("item")
 )
 
-# 2. Non-existent column in aggregation
-df2 = df1.groupBy("department").agg(  # department doesn't exist (should be dept)
-    sum("salary").alias("total_salary"),
-    avg("bonus").alias("avg_bonus"),
-    count("employee_id").alias("emp_count")  # employee_id doesn't exist (should be emp_id)
+# Multiple aggregations on skewed data
+result1 = exploded_df.groupBy("key1", "group").agg(
+    sum("count").alias("total_count"),
+    sum("price").alias("total_price"),
+    avg("price").alias("avg_price"),
+    count("item").alias("item_count"),
+    collect_list("item").alias("items_list")
 )
 
-# 3. Non-existent column in window
-from pyspark.sql.window import Window
-window_spec = Window.partitionBy("dept_name").orderBy("hire_date")  # dept_name doesn't exist
-
-df3 = df2.withColumn(
-    "row_num",
-    row_number().over(window_spec)
-)
-
-# 4. Non-existent column in join condition
-df4 = df3.join(
-    df3.withColumnRenamed("salary", "salary2"),
-    df3.emp_id == df3.withColumnRenamed("salary", "salary2").emp_id,  # This might work
+# Another join with itself
+result2 = result1.join(
+    result1.withColumnRenamed("total_count", "total_count2"),
+    result1.key1 == result1.withColumnRenamed("total_count", "total_count2").key1,
     "inner"
 )
 
-# 5. Non-existent column in complex expression
-df5 = df4.withColumn(
-    "performance_score",
-    when(col("projects") > 5, col("salary") * 1.1)
-    .when(col("years_of_exp") > 3, col("salary") * 1.05)  # years_of_exp doesn't exist
-    .otherwise(col("salary"))
+# Window functions on skewed data
+window_spec = Window.partitionBy("key1").orderBy(col("total_price").desc())
+result3 = result2.withColumn(
+    "rank_by_price",
+    row_number().over(window_spec)
+).withColumn(
+    "cumulative_sum",
+    sum("total_price").over(Window.partitionBy("key1").orderBy("total_price"))
 )
 
-# 6. Non-existent column in select
-df6 = df5.select(
-    col("emp_id"),
-    col("name"),
-    col("dept_name"),  # doesn't exist
-    col("total_compensation")  # doesn't exist
+# Another repartition causing more shuffling
+result4 = result3.repartition(1000, "key1")
+
+# Complex UDF that creates more memory pressure
+@udf(returnType=ArrayType(StringType()))
+def process_items(items):
+    # This will create large intermediate arrays
+    result = []
+    for item in items:
+        for i in range(10):  # Multiply data even more
+            result.append(f"{item}_{i}")
+    return result
+
+result5 = result4.withColumn(
+    "processed_items",
+    process_items(col("items_list"))
 )
 
-# 7. Non-existent column in filter
-df7 = df6.filter(col("status") == "ACTIVE")  # status doesn't exist
-
-# 8. Non-existent column in orderBy
-df8 = df7.orderBy(col("hire_date").desc(), col("last_name"))  # last_name doesn't exist
-
-# 9. Non-existent column in struct
-df9 = df8.withColumn(
-    "employee_info",
-    struct(
-        col("emp_id"),
-        col("first_name"),  # doesn't exist (should be name)
-        col("dept"),
-        col("salary"),
-        col("hire_date")
-    )
+# Explode again
+final_df = result5.select(
+    col("key1"),
+    col("group"),
+    col("total_price"),
+    explode(col("processed_items")).alias("processed_item")
 )
 
-# 10. Non-existent column in array
-df10 = df9.withColumn(
-    "dept_info",
-    array(
-        col("dept"),
-        col("dept_code"),  # doesn't exist
-        col("dept_manager")  # doesn't exist
-    )
-)
+# Force execution - will cause OutOfMemoryError
+final_df.count()
 
-# Force execution - will throw AnalysisException
-df10.show()
-
-# Additional operation that will also fail
-df10.groupBy("dept").agg(
-    sum("total_compensation").alias("total_comp")  # total_compensation doesn't exist
-).show()
+# Additional collect will cause driver OOM
+all_data = final_df.collect()
