@@ -1,178 +1,138 @@
-# Databricks Notebook - Test Case 5
-# ERROR: SparkException with "Python worker failed to connect back" or "Python exception" 
-# Expected log error: "PicklingError" or "PythonException" or "ValueError"
+# Databricks Notebook - Customer Sales Analysis
+# This notebook analyzes customer sales data from a CSV file
 
-from pyspark.sql.functions import udf, col, struct, array
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, ArrayType
-import pickle
-import sys
+from pyspark.sql.functions import col, sum, avg, count, max, min, round
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, DateType
 
-# Create data
-data = [
-    (1, "A", 100.0, ["x", "y", "z"]),
-    (2, "B", 200.0, ["a", "b"]),
-    (3, "C", 300.0, ["m", "n", "o", "p"]),
-    (4, "D", 400.0, ["q", "r"]),
-    (5, "E", 500.0, ["s", "t", "u"])
-]
+# Define the schema for the sales data
+sales_schema = StructType([
+    StructField("customer_id", StringType(), True),
+    StructField("customer_name", StringType(), True),
+    StructField("purchase_amount", DoubleType(), True),
+    StructField("purchase_date", StringType(), True),
+    StructField("product_category", StringType(), True),
+    StructField("store_location", StringType(), True)
+])
 
-df = spark.createDataFrame(data, ["id", "code", "value", "items"])
+# Define the path to the CSV file
+file_path = "/Volumes/default/customer_data/sales_records.csv"
 
-# ERROR 1: UDF that tries to use unpickleable objects
-class CustomProcessor:
-    def __init__(self, threshold):
-        self.threshold = threshold
-        self.cache = {}
-    
-    def process(self, value):
-        # This object can't be pickled
-        return value * self.threshold
+# Read the CSV file
+sales_df = spark.read \
+    .option("header", "true") \
+    .option("inferSchema", "false") \
+    .schema(sales_schema) \
+    .csv(file_path)
 
-processor = CustomProcessor(1.5)
+# Cache the data for faster processing
+sales_df.cache()
 
-@udf(returnType=DoubleType())
-def process_value(value):
-    # This will fail when trying to serialize processor
-    return processor.process(value)  # processor can't be pickled
+# Show the first few records
+print("Sample of sales data:")
+sales_df.show(10, truncate=False)
 
-df1 = df.withColumn(
-    "processed_value",
-    process_value(col("value"))
+# Display data schema
+print("Data Schema:")
+sales_df.printSchema()
+
+# Basic statistics
+print("Basic Statistics:")
+sales_df.describe().show()
+
+# Total sales by customer
+print("Total Sales by Customer:")
+customer_sales = sales_df.groupBy("customer_id", "customer_name").agg(
+    sum("purchase_amount").alias("total_purchases"),
+    count("purchase_amount").alias("purchase_count"),
+    avg("purchase_amount").alias("avg_purchase"),
+    max("purchase_amount").alias("max_purchase"),
+    min("purchase_amount").alias("min_purchase")
+).orderBy(col("total_purchases").desc())
+
+customer_sales.show(20, truncate=False)
+
+# Total sales by product category
+print("Sales by Product Category:")
+category_sales = sales_df.groupBy("product_category").agg(
+    sum("purchase_amount").alias("category_total"),
+    count("purchase_amount").alias("transaction_count"),
+    avg("purchase_amount").alias("avg_transaction")
+).orderBy(col("category_total").desc())
+
+category_sales.show(truncate=False)
+
+# Monthly sales trend
+from pyspark.sql.functions import substring
+
+sales_df = sales_df.withColumn(
+    "month",
+    substring(col("purchase_date"), 1, 7)  # Extract YYYY-MM
 )
 
-# ERROR 2: UDF with nested functions and closures
-@udf(returnType=ArrayType(StringType()))
-def process_items(items):
-    # Nested function with closure
-    def inner_process(item):
-        # This creates complex closure that can't be pickled
-        return item.upper() + "_" + str(len(item))
-    
-    # Lambda with complex closure
-    result = list(map(lambda x: inner_process(x), items))
-    return result
+print("Monthly Sales Trend:")
+monthly_sales = sales_df.groupBy("month").agg(
+    sum("purchase_amount").alias("monthly_total"),
+    count("purchase_amount").alias("transaction_count")
+).orderBy("month")
 
-df2 = df1.withColumn(
-    "processed_items",
-    process_items(col("items"))
+monthly_sales.show(truncate=False)
+
+# Store performance analysis
+print("Store Performance:")
+store_performance = sales_df.groupBy("store_location").agg(
+    sum("purchase_amount").alias("store_revenue"),
+    count("purchase_amount").alias("store_transactions"),
+    avg("purchase_amount").alias("avg_transaction_value")
+).orderBy(col("store_revenue").desc())
+
+store_performance.show(truncate=False)
+
+# Customer segmentation based on purchase behavior
+from pyspark.sql.functions import when
+
+customer_segments = customer_sales.withColumn(
+    "segment",
+    when(col("total_purchases") > 10000, "Premium")
+    .when(col("total_purchases") > 5000, "Gold")
+    .when(col("total_purchases") > 1000, "Silver")
+    .otherwise("Bronze")
 )
 
-# ERROR 3: UDF using non-serializable module-level variables
-MODULE_CONFIG = {
-    "mode": "strict",
-    "threshold": 0.75,
-    "mapping": {"A": 1, "B": 2, "C": 3, "D": 4}
-}
+print("Customer Segmentation:")
+customer_segments.groupBy("segment").agg(
+    count("customer_id").alias("customer_count"),
+    sum("total_purchases").alias("segment_revenue"),
+    avg("total_purchases").alias("avg_customer_value")
+).show(truncate=False)
 
-@udf(returnType=StringType())
-def apply_config(code, value):
-    # Uses module-level dict that might not pickle properly
-    mapping = MODULE_CONFIG["mapping"]
-    mode = MODULE_CONFIG["mode"]
-    threshold = MODULE_CONFIG["threshold"]
-    
-    # Complex logic using external data
-    if code in mapping:
-        mapped_value = mapping[code]
-        if value > threshold * 100:
-            return f"{mode}_{mapped_value}_{code}"
-        else:
-            return f"{mode}_low_{mapped_value}"
-    else:
-        return "unknown"
+# Calculate retention metrics
+from pyspark.sql.functions import datediff, current_date
 
-df3 = df2.withColumn(
-    "config_result",
-    apply_config(col("code"), col("processed_value"))
+# This will fail if the file is not found
+total_revenue = sales_df.agg(sum("purchase_amount")).collect()[0][0]
+total_customers = sales_df.select("customer_id").distinct().count()
+total_transactions = sales_df.count()
+
+print(f"Total Revenue: ${total_revenue:,.2f}")
+print(f"Total Customers: {total_customers}")
+print(f"Total Transactions: {total_transactions}")
+print(f"Average Transaction Value: ${total_revenue/total_transactions:,.2f}")
+
+# Save aggregated results
+final_results = customer_sales.join(
+    category_sales.withColumnRenamed("category_total", "sales_by_category"),
+    customer_sales.customer_id == category_sales.product_category,
+    "full"
 )
 
-# ERROR 4: UDF with generator functions
-@udf(returnType=ArrayType(DoubleType()))
-def generate_sequence(value):
-    # Generator that yields values
-    def gen():
-        for i in range(10):
-            yield value * i
-    
-    # Converting generator to list - may fail in distributed context
-    return list(gen())
+final_results.show(truncate=False)
 
-df4 = df3.withColumn(
-    "sequence",
-    generate_sequence(col("processed_value"))
-)
+# Additional analysis - top spending customers by category
+top_customers = sales_df.groupBy("customer_id", "customer_name", "product_category").agg(
+    sum("purchase_amount").alias("spend_by_category")
+).orderBy(col("spend_by_category").desc())
 
-# ERROR 5: UDF with external library imports inside nested scope
-@udf(returnType=DoubleType())
-def calculate_statistics(items):
-    # Import inside function might fail in distributed execution
-    import statistics
-    import numpy as np  # numpy might not be available
-    
-    try:
-        # Complex statistics that might fail
-        mean = statistics.mean(items)
-        # This might fail if numpy not available
-        std = np.std(items)
-        return mean / std
-    except:
-        return None
+print("Top Customers by Category Spend:")
+top_customers.show(20, truncate=False)
 
-df5 = df4.withColumn(
-    "stats_result",
-    calculate_statistics(col("processed_items"))
-)
-
-# ERROR 6: UDF with multiple return types
-@udf(returnType=StringType())
-def complex_processing(value, code):
-    # This returns different types - will cause serialization issues
-    if value > 200:
-        return {"status": "high", "value": value}  # Returns dict
-    elif code == "B":
-        return [value, code, value * 2]  # Returns list
-    else:
-        return value  # Returns float
-
-df6 = df5.withColumn(
-    "complex_result",
-    complex_processing(col("processed_value"), col("code"))
-)
-
-# ERROR 7: UDF with recursive function that has external reference
-external_list = [1, 2, 3, 4, 5]
-
-@udf(returnType=DoubleType())
-def recursive_sum(n):
-    def rec_helper(x):
-        # References external_list - will fail to pickle
-        if x == 0:
-            return sum(external_list)
-        return x + rec_helper(x - 1)
-    return rec_helper(int(n))
-
-df7 = df6.withColumn(
-    "recursive_sum_result",
-    recursive_sum(col("value"))
-)
-
-# ERROR 8: UDF trying to access filesystem
-@udf(returnType=StringType())
-def read_config(id):
-    # Trying to read file in UDF - will fail
-    with open("/dbfs/mnt/config/config.txt", "r") as f:
-        config = f.read()
-    return config
-
-df8 = df7.withColumn(
-    "config_data",
-    read_config(col("id"))
-)
-
-# Force execution - will cause Python pickling/serialization errors
-df8.show()
-
-# Additional operation that will fail
-df8.groupBy("code").agg(
-    collect_list("complex_result").alias("results")
-).show()
+print("Analysis Complete!")
